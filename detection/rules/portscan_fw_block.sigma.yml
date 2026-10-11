@@ -1,0 +1,74 @@
+title: Network Port Scan - Multiple Distinct Ports Blocked From One Source
+id: 7c1f6d3e-5a62-4e0b-9a43-2f9a1d6c0b11
+status: experimental
+description: >
+  Detecta una IP de origen cuyas conexiones TCP SYN son bloqueadas/logueadas
+  contra muchos puertos destino distintos en una ventana corta. Patrón típico
+  de un escaneo vertical (nmap -sS / -sT, portscan connect o SYN).
+references:
+  - https://attack.mitre.org/techniques/T1046/
+author: portscan project
+date: 2026-10-10
+tags:
+  - attack.discovery
+  - attack.t1046
+logsource:
+  category: firewall
+detection:
+  selection:
+    action:
+      - blocked
+      - denied
+      - dropped
+    protocol: tcp
+  condition: selection
+falsepositives:
+  - Scanners de vulnerabilidades autorizados y monitoreo de disponibilidad
+  - Hosts de gestión que sondean muchos servicios (poner en allowlist)
+level: low
+---
+title: Network Port Scan - Value Count Correlation
+id: 0b9e1a54-83d7-4b2c-8e21-6a4c5d7f9e22
+status: experimental
+description: >
+  Correlación Sigma: >= 15 puertos destino distintos desde la misma IP origen en 10 s
+  (regla rápida del detector portscan-detect). Ajusta el umbral al ruido de tu red.
+author: portscan project
+date: 2026-10-10
+tags:
+  - attack.discovery
+  - attack.t1046
+correlation:
+  type: value_count
+  rules:
+    - 7c1f6d3e-5a62-4e0b-9a43-2f9a1d6c0b11
+  group-by:
+    - src_ip
+  timespan: 10s
+  condition:
+    gte: 15
+    field: dst_port
+level: medium
+---
+title: Network Port Scan - Slow Scan Variant
+id: 4d2c8b77-91a0-4f35-b6de-1e8f3a2c7d33
+status: experimental
+description: >
+  Variante lenta para escaneos que evaden la ventana rápida: >= 40 puertos
+  distintos desde un origen en 1 hora. Más falsos positivos; revisar por origen.
+author: portscan project
+date: 2026-10-10
+tags:
+  - attack.discovery
+  - attack.t1046
+correlation:
+  type: value_count
+  rules:
+    - 7c1f6d3e-5a62-4e0b-9a43-2f9a1d6c0b11
+  group-by:
+    - src_ip
+  timespan: 1h
+  condition:
+    gte: 40
+    field: dst_port
+level: low

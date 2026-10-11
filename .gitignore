@@ -1,0 +1,8 @@
+__pycache__/
+*.egg-info/
+*.pyc
+c/synscan
+*.jsonl
+.venv/
+reports/
+scope.txt

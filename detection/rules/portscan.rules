@@ -1,0 +1,28 @@
+# Reglas Suricata - Network Service Discovery (MITRE ATT&CK T1046)
+# Copiar a /etc/suricata/rules/ y añadir a suricata.yaml (rule-files).
+#
+# LIMITACIÓN: 'threshold' cuenta EVENTOS (SYN) por origen, no puertos distintos.
+# Un cliente legítimo que reintenta o abre muchas conexiones al mismo puerto
+# también cuenta. Para "puertos distintos" usa detect/portscan-detect (eve.json).
+
+# Escaneo rápido: >= 20 SYN desde un origen en 5 s hacia la red protegida.
+alert tcp any any -> $HOME_NET any (msg:"PORTSCAN fast SYN scan (T1046)"; \
+    flags:S,12; \
+    threshold: type both, track by_src, count 20, seconds 5; \
+    classtype:attempted-recon; sid:9100001; rev:1; \
+    metadata:attack_target Network, mitre_technique_id T1046;)
+
+# Escaneo lento: >= 60 SYN desde un origen en 10 min.
+alert tcp any any -> $HOME_NET any (msg:"PORTSCAN slow SYN scan (T1046)"; \
+    flags:S,12; \
+    threshold: type both, track by_src, count 60, seconds 600; \
+    classtype:attempted-recon; sid:9100002; rev:1; \
+    metadata:attack_target Network, mitre_technique_id T1046;)
+
+# Connect scan que cierra con RST tras el SYN-ACK suele verse como muchos RST
+# salientes; esta regla busca puertos cerrados respondidos con RST hacia un origen.
+alert tcp $HOME_NET any -> any any (msg:"PORTSCAN many RST replies to one source (T1046)"; \
+    flags:R,12; \
+    threshold: type both, track by_dst, count 25, seconds 5; \
+    classtype:attempted-recon; sid:9100003; rev:1; \
+    metadata:attack_target Network, mitre_technique_id T1046;)

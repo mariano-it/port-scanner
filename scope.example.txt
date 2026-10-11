@@ -1,0 +1,5 @@
+# Alcance autorizado: una entrada por línea (IP, CIDR o hostname).
+# Solo se escanea lo que esté listado aquí. Sin este archivo, no hay escaneo.
+127.0.0.1
+192.168.56.0/24
+# lab.local

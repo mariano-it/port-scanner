@@ -38,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="orígenes distintos mínimos (default 5)")
     p.add_argument("--allow", action="append", default=[], metavar="IP",
                    help="IP a ignorar (monitoreo, scanners autorizados)")
+    p.add_argument("--eve-include-established", action="store_true",
+                   help="cuenta también flujos eve con tráfico real (más falsos positivos)")
     p.add_argument("--year", type=int, help="año para logs syslog sin año")
     p.add_argument("--json", action="store_true", help="salida JSON")
     args = p.parse_args(argv)
@@ -58,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
                 with open(path, errors="replace") as fh:
                     yield from fh
 
-    events = list(parse_lines(lines(), args.format, args.year))
+    events = list(parse_lines(lines(), args.format, args.year, args.eve_include_established))
     alerts = detect(events, rules, args.allow)
 
     if args.json:

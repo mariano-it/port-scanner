@@ -47,9 +47,9 @@ ofensiva vs. defensiva con datos**.
 |---|---|
 | **Scanner** | TCP connect concurrente (hilos), límite de velocidad global, IPv4/IPv6, CIDR y hostnames |
 | **Identificación** | *Banner grabbing* pasivo, sondeo HTTP en puertos no estándar e información TLS (versión y cipher) |
-| **Hallazgos** | Telnet, FTP, SMB, RDP, VNC, bases de datos expuestas, OpenSSH desactualizado, TLS obsoleto, versiones de servidor web, cada uno con su remediación |
+| **Hallazgos** | Telnet, FTP, SMB, RDP, VNC, bases de datos expuestas, Redis con/sin autenticación, OpenSSH desactualizado, TLS 1.0/1.1 aceptado (sondeo por versión), versiones de servidor web, cada uno con su remediación |
 | **Reportes** | JSON y Markdown con severidades; mismo modelo `Finding` que `osint-tool` para combinar resultados |
-| **Controles** | Alcance obligatorio, rangos privados por defecto, tope de velocidad y de hosts, log de auditoría |
+| **Controles** | Alcance obligatorio validado antes de expandir, rangos privados por defecto, tope de velocidad y de hosts, log de auditoría encadenado, reportes `0600` |
 | **Detector** | Ventanas deslizantes sobre logs UFW/iptables y `eve.json` de Suricata, clasificación vertical / horizontal / bloque / distribuido |
 | **Reglas** | Sigma (con correlación `value_count`) y Suricata, mapeadas a MITRE ATT&CK T1046 |
 | **Experimento** | Perfiles de escaneo contra el detector: qué se detecta, qué se evade y qué da falsos positivos |
@@ -68,7 +68,9 @@ python3 run.py
 `run.py` abre un menú que te guía paso a paso:
 
 1. Escribes la IP, un rango (`192.168.56.0/24`) o un hostname.
-2. Confirmas que tienes autorización (para IPs públicas debes escribir `SI`).
+2. Si el objetivo **no está** en `scope.txt`, te lo dice y te pide escribir `AUTORIZO`: esa
+   decisión es independiente del escaneo y queda anotada en el archivo (bórrala de ahí para
+   revocarla). Para IPs públicas, además, debes escribir `SI`.
 3. Eliges un perfil: **Rápido** (top 100), **Estándar** (1-1024), **Completo** (1-65535) o
    **Personalizado**.
 4. Ves el progreso, la tabla de puertos con banners y los hallazgos con su remediación.
@@ -112,7 +114,7 @@ pip install -e .
 |---|---|
 | `--scope FILE` | **Obligatoria.** Archivo con el alcance autorizado (ver `scope.example.txt`) |
 | `-p`, `--ports` | `22,80,1-1024` o `-` para los 65535 (por defecto `1-1024`) |
-| `--top-ports N` | Los N puertos más comunes (usa la frecuencia de nmap si está instalado) |
+| `--top-ports N` | Los N puertos más comunes, N ≥ 1 (usa la frecuencia de nmap si está instalado) |
 | `--rate N` | Intentos por segundo (por defecto 100, tope 5000) |
 | `--timeout S` | Segundos por conexión (por defecto 1) |
 | `--workers N` | Hilos concurrentes (por defecto 64) |
@@ -142,7 +144,7 @@ HOST       PUERTO    ESTADO    SERVICIO       BANNER
 Hallazgos:
   [HIGH  ] Telnet abierto  (127.0.0.1:2323 telnet | login:)
            -> Deshabilita telnet y usa SSH con autenticación por clave.
-  [HIGH  ] Redis expuesto  (127.0.0.1:6380 redis | -NOAUTH Authentication required.)
+  [MEDIUM] Redis expuesto (autenticación activa)  (127.0.0.1:6380 redis | -NOAUTH Authentication required.)
            -> Enlaza a 127.0.0.1, activa requirepass/ACL y filtra el puerto.
   [MEDIUM] Versión de SSH desactualizada  (127.0.0.1:2222 ssh | SSH-2.0-OpenSSH_7.4)
            -> Actualiza OpenSSH desde el repositorio de la distribución.
@@ -159,14 +161,38 @@ y no son opcionales:
 
 - **Alcance obligatorio.** Sin `--scope` no hay escaneo. Si el objetivo no está listado, se
   rechaza con código de salida 2. Los rangos menores a /16 (IPv4) no se aceptan en el archivo.
+- **Validación antes de expandir.** El tamaño y la pertenencia al alcance se comprueban sobre
+  la red (`num_addresses`, `subnet_of`) antes de enumerar hosts: un `/8` o un IPv6 `/64` fuera
+  de alcance se rechaza al instante, sin consumir memoria ni tiempo.
 - **Privado por defecto.** Las IPs públicas requieren `--allow-public` y, en modo
   interactivo, escribir `SI` de forma explícita.
 - **Velocidad limitada.** `--rate` tiene tope para no tumbar tu propio laboratorio.
-- **Auditoría.** Cada escaneo, y también cada rechazo, queda registrado en un JSONL
-  *append-only* con usuario, fecha, argumentos, alcance (con su sha256) y resultado. Por
-  defecto en `~/.local/state/portscan/audit.jsonl`.
-- **Modo interactivo = misma capa.** `run.py` solo construye una llamada al CLI; no se salta
-  ninguna de estas protecciones.
+- **Modo interactivo.** `run.py` construye una llamada al CLI y la consulta de alcance es de
+  solo lectura. Para escanear algo que no está en `scope.txt` hay una acción aparte y
+  deliberada (`AUTORIZO`); no es un efecto secundario de escanear. Es una comodidad para un
+  usuario único en su propio lab: **no sustituye** un control de acceso real.
+- **Auditoría.** Cada escaneo, y también cada rechazo y cada interrupción, queda en un JSONL
+  con usuario, fecha, argumentos, alcance (con su sha256) y resultado. Por defecto en
+  `~/.local/state/portscan/audit.jsonl` (permisos `0600`).
+- **Banners = datos no confiables.** Se filtran caracteres de control y, en el reporte
+  Markdown, siempre se emiten como código en línea con un delimitador que el contenido no
+  puede cerrar, de modo que un servicio hostil no inyecta enlaces ni HTML.
+- **Reportes privados.** Los `.json`/`.md` se crean con permisos `0600`: describen tu red.
+
+### Limitaciones conocidas
+
+- **El log de auditoría es un registro, no un control.** Quien pueda escribir el archivo puede
+  editarlo. Cada entrada incluye el hash de la anterior, así que modificar o borrar una línea
+  intermedia es detectable (`AuditLog.verify()`); truncar el final solo se impide con
+  permisos del sistema, p. ej. `sudo chattr +a ~/.local/state/portscan/audit.jsonl`.
+- **Versiones por banner.** "OpenSSH < 8.0" se infiere del banner; RHEL/CentOS y otras
+  distribuciones parchean sin cambiar la versión, así que puede ser un falso positivo. El
+  hallazgo lo advierte y propone verificarlo con el gestor de paquetes.
+- **TLS obsoleto** se sondea con el OpenSSL local; si el sistema no puede hablar TLS 1.0/1.1
+  no se reporta nada (sin falsos positivos, pero con posibles falsos negativos).
+- **Redis** se clasifica por la respuesta a una petición ajena: `-ERR` (sin autenticación,
+  HIGH) frente a `-NOAUTH` (con autenticación, MEDIUM). Sin `--banners` solo se informa de que
+  está expuesto.
 
 ## Detector y reglas (lado defensivo)
 
@@ -189,6 +215,12 @@ Reglas por defecto, todas etiquetadas **T1046 (Network Service Discovery)**:
 
 Todas son configurables desde la línea de comandos (`--window`, `--threshold`,
 `--slow-window`, `--dist-*`).
+
+**Sobre `eve.json`:** los eventos `flow` incluyen tráfico exitoso, y un cliente que navega a
+20 servidores por `:443` parecería un barrido. Por eso solo se cuentan los flujos que no pasan
+del handshake (`pkts_toclient ≤ 2`) y los eventos `alert`/`anomaly`. Con
+`--eve-include-established` se cuenta todo (más falsos positivos). Los logs de bloqueo de UFW
+no tienen este problema porque solo registran lo bloqueado.
 
 Reglas para tus propias herramientas, en `detection/rules/`:
 
@@ -218,6 +250,7 @@ Resultado con las reglas por defecto:
 | Paranoico (1 puerto cada 5 min) | **Evade** hasta añadir una ventana de 24 h |
 | Dirigido lento (20 servicios, 1 cada 10 s) | **Evade** hasta bajar el umbral de la ventana lenta |
 | Monitoreo legítimo espaciado | **Falso positivo** al bajar el umbral para cazar lo lento |
+| Navegación web en `eve.json` (40 servidores :443) | Sin alerta; **falso positivo** si se cuentan todos los flujos |
 
 Conclusión: bajar el umbral y alargar la ventana reduce la evasión, pero sube los falsos
 positivos. Es un compromiso que se mide, no una configuración correcta única. El detalle
@@ -247,7 +280,7 @@ port-scanner/
 ├── detection/rules/            # Sigma, Suricata, guía de logging
 ├── experiments/                # experimento y resultados
 ├── lab/fake_services.py        # servicios falsos para pruebas
-└── tests/                      # 35 pruebas (unittest)
+└── tests/                      # 50 pruebas (unittest)
 ```
 
 ## Pruebas
@@ -256,8 +289,11 @@ port-scanner/
 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
-Cubren alcance, límite de velocidad, escaneo contra sockets locales, hallazgos, parsers,
-detector (rápido, lento, horizontal, distribuido, lista de permitidos) y el CLI.
+Cubren alcance (incluido el rechazo de rangos enormes sin expandir), límite de velocidad,
+clasificación de estados sin red (errno simulado), escaneo contra sockets locales, sondeo TLS
+por versión contra un servidor TLS local, hallazgos, escapado de Markdown hostil, cadena de
+auditoría, parsers, detector (rápido, lento, horizontal, distribuido, falsos positivos de
+`eve.json`) y el CLI. No dependen de Internet.
 
 ## Contraste con nmap y Wireshark
 

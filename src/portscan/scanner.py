@@ -8,6 +8,7 @@ import socket
 import ssl
 import threading
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable
@@ -34,6 +35,39 @@ class ScanConfig:
     banners: bool = False
     banner_timeout: float = 1.0
     shuffle: bool = False
+
+
+LEGACY_TLS = ("TLSv1", "TLSv1_1")
+
+
+def probe_legacy_tls(host: str, port: int, timeout: float = 2.0) -> list[str]:
+    """Versiones TLS obsoletas que el servidor ACEPTA, probando cada una por separado.
+
+    Fija minimum_version == maximum_version: un handshake normal negociaría la mejor
+    versión y jamás revelaría que además acepta TLS 1.0/1.1. Si el OpenSSL local no
+    puede hablar esa versión, simplemente no se reporta (no hay falso positivo).
+    """
+    accepted: list[str] = []
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    for name in LEGACY_TLS:
+        version = getattr(ssl.TLSVersion, name)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                ctx.set_ciphers("ALL:@SECLEVEL=0")
+                ctx.minimum_version = version
+                ctx.maximum_version = version
+            with socket.socket(family, socket.SOCK_STREAM) as raw:
+                raw.settimeout(timeout)
+                raw.connect((host, port))
+                with ctx.wrap_socket(raw, server_hostname=None):
+                    accepted.append(name.replace("_", "."))
+        except (ssl.SSLError, OSError, ValueError):
+            continue
+    return accepted
 
 
 def _decode(raw: bytes) -> str:
@@ -68,7 +102,8 @@ def _http_server_line(raw: bytes) -> str:
 
 
 def grab_banner(sock: socket.socket, port: int, host: str, cfg: ScanConfig) -> tuple[str, str]:
-    """Devuelve (banner, tls_info). Pasivo primero; sondea HTTP/TLS si hace falta."""
+    """Devuelve (banner, tls_info). Pasivo primero; sondea HTTP/TLS si hace falta.
+    Las versiones TLS obsoletas se sondean aparte (probe_legacy_tls)."""
     tls_info = ""
     if port in TLS_PORTS:
         try:
@@ -108,11 +143,14 @@ def probe_port(host: str, port: int, cfg: ScanConfig) -> PortResult:
         code = sock.connect_ex((host, port))
         if code == 0:
             banner = tls = ""
+            legacy: list[str] = []
             if cfg.banners:
                 banner, tls = grab_banner(sock, port, host, cfg)
+                if tls:
+                    legacy = probe_legacy_tls(host, port, cfg.banner_timeout + 1)
             service = identify(port, banner) if banner else name_for_port(port)
             return PortResult(host, port, PortState.OPEN, service=service,
-                              banner=banner, tls=tls)
+                              banner=banner, tls=tls, tls_legacy=legacy)
         if code == errno.ECONNREFUSED or code == errno.ECONNRESET:
             return PortResult(host, port, PortState.CLOSED)
         return PortResult(host, port, PortState.FILTERED)

@@ -27,8 +27,8 @@ _RISKY: dict[int, tuple[str, Severity, str, str]] = {
     5900: ("VNC expuesto", Severity.HIGH,
            "VNC suele tener autenticación débil o nula y tráfico sin cifrar.",
            "Túnel por SSH/VPN y contraseña fuerte; no exponer a la red general."),
-    6379: ("Redis expuesto", Severity.HIGH,
-           "Redis sin autenticación permite lectura/escritura y a veces RCE.",
+    6379: ("Redis expuesto", Severity.MEDIUM,
+           "Redis accesible desde la red; sin --banners no se sabe si exige autenticación.",
            "Enlaza a 127.0.0.1, activa requirepass/ACL y filtra el puerto."),
     27017: ("MongoDB expuesto", Severity.HIGH,
             "MongoDB accesible en red; históricamente sin autenticación por defecto.",
@@ -56,9 +56,24 @@ _RISKY: dict[int, tuple[str, Severity, str, str]] = {
 # nombre de servicio -> puerto canónico, para detectar servicios en puertos no estándar
 _SERVICE_TO_PORT = {PORT_NAMES[p]: p for p in _RISKY if p in PORT_NAMES}
 
+_RISKY_REDIS_KEY = 6379
+
+
+def _redis_detail(banner: str, title: str, sev: Severity, desc: str):
+    """Separa Redis abierto sin auth (-ERR a un comando ajeno) de Redis con auth (-NOAUTH)."""
+    if banner.startswith("-NOAUTH") or banner.startswith("-DENIED"):
+        return ("Redis expuesto (autenticación activa)", Severity.MEDIUM,
+                "Redis responde -NOAUTH: exige autenticación, pero no debería ser "
+                "alcanzable desde la red general.")
+    if banner.startswith("-ERR") or banner.startswith("+"):
+        return ("Redis sin autenticación", Severity.HIGH,
+                "Redis ejecuta/parsea comandos sin credenciales: lectura y escritura "
+                "de datos y, a menudo, ejecución de código.")
+    return title, sev, desc
+
+
 _OPENSSH = re.compile(r"OpenSSH[_-](\d+)\.(\d+)", re.I)
 _SERVER_VERSION = re.compile(r"Server:\s*([A-Za-z\-_]+)/(\d[\w.\-]*)", re.I)
-_WEAK_TLS = {"SSLv2", "SSLv3", "TLSv1", "TLSv1.1"}
 OPENSSH_MIN = (8, 0)
 
 
@@ -72,6 +87,8 @@ def analyze(results: list[PortResult]) -> list[Finding]:
         key = r.port if r.port in _RISKY else _SERVICE_TO_PORT.get(r.service)
         if key is not None:
             title, sev, desc, fix = _RISKY[key]
+            if _RISKY_REDIS_KEY == key:
+                title, sev, desc = _redis_detail(r.banner, title, sev, desc)
             findings.append(Finding(title, sev, desc, fix, evidence))
         if r.banner.startswith("SSH-1.") and not r.banner.startswith("SSH-1.99"):
             findings.append(Finding(
@@ -82,13 +99,17 @@ def analyze(results: list[PortResult]) -> list[Finding]:
         if m and (int(m.group(1)), int(m.group(2))) < OPENSSH_MIN:
             findings.append(Finding(
                 "Versión de SSH desactualizada", Severity.MEDIUM,
-                f"OpenSSH {m.group(1)}.{m.group(2)} es anterior a "
-                f"{OPENSSH_MIN[0]}.{OPENSSH_MIN[1]} y acumula CVEs corregidos.",
-                "Actualiza OpenSSH desde el repositorio de la distribución.", evidence))
-        if r.tls.split(" ")[0] in _WEAK_TLS:
+                f"El banner declara OpenSSH {m.group(1)}.{m.group(2)}, anterior a "
+                f"{OPENSSH_MIN[0]}.{OPENSSH_MIN[1]}. Ojo: RHEL/CentOS y otras distribuciones "
+                "parchean (backport) sin cambiar el número de versión, así que esto puede "
+                "ser un falso positivo.",
+                "Verifica en el gestor de paquetes si los CVE están parcheados "
+                "(rpm -q --changelog openssh | grep CVE) y, si no, actualiza.", evidence))
+        if r.tls_legacy:
             findings.append(Finding(
                 "TLS obsoleto aceptado", Severity.MEDIUM,
-                f"El servicio negoció {r.tls.split(' ')[0]}, considerado inseguro.",
+                f"El servidor acepta {', '.join(r.tls_legacy)} (sondeado por versión), "
+                "protocolos obsoletos y vulnerables.",
                 "Exige TLS 1.2 o superior en la configuración del servicio.", evidence))
         sv = _SERVER_VERSION.search(r.banner)
         if sv:

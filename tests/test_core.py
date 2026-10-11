@@ -1,9 +1,11 @@
+import errno
 import json
 import socket
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from portscan import cli
 from portscan.analyze import analyze
@@ -158,10 +160,37 @@ class ScannerTest(unittest.TestCase):
         self.assertEqual(len(seen), 2)
         self.assertEqual([r.state for r in res if r.port == port], [PortState.OPEN])
 
-    def test_filtered_on_timeout(self):
-        # 192.0.2.0/24 (TEST-NET-1) no enruta: timeout o "unreachable" => filtered
-        res = probe_port("192.0.2.1", 81, ScanConfig(timeout=0.3))
-        self.assertEqual(res.state, PortState.FILTERED)
+    def _fake_socket(self, outcome):
+        class Fake:
+            def __init__(self, *a, **k):
+                pass
+
+            def settimeout(self, t):
+                pass
+
+            def connect_ex(self, addr):
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return outcome
+
+            def close(self):
+                pass
+
+        return mock.patch("portscan.scanner.socket.socket", Fake)
+
+    def test_state_classification_without_network(self):
+        cfg = ScanConfig()
+        cases = [
+            (errno.ETIMEDOUT, PortState.FILTERED),
+            (errno.EHOSTUNREACH, PortState.FILTERED),
+            (errno.ECONNREFUSED, PortState.CLOSED),
+            (0, PortState.OPEN),
+            (socket.timeout(), PortState.FILTERED),
+            (OSError(errno.ENETUNREACH, "x"), PortState.FILTERED),
+        ]
+        for outcome, expected in cases:
+            with self._fake_socket(outcome):
+                self.assertEqual(probe_port("192.0.2.1", 81, cfg).state, expected, outcome)
 
 
 class AnalyzeTest(unittest.TestCase):
@@ -174,15 +203,21 @@ class AnalyzeTest(unittest.TestCase):
             self._open(22, "ssh", "SSH-2.0-OpenSSH_7.4"),
             self._open(22022, "ssh", "SSH-2.0-OpenSSH_9.6"),
             self._open(8080, "http", "HTTP/1.1 200 OK | Server: nginx/1.14.0"),
-            self._open(9999, "redis", "-NOAUTH"),
-            self._open(443, "https", "", "TLSv1 ECDHE"),
+            self._open(9999, "redis", "-NOAUTH Authentication required."),
+            self._open(9998, "redis", "-ERR unknown command 'HEAD'"),
+            PortResult("10.0.0.1", 443, PortState.OPEN, service="https",
+                       tls="TLSv1.3 X", tls_legacy=["TLSv1"]),
         ])
         titles = [f.title for f in findings]
         self.assertIn("Telnet abierto", titles)
         self.assertIn("Versión de SSH desactualizada", titles)
         self.assertEqual(titles.count("Versión de SSH desactualizada"), 1)
         self.assertIn("Versión de servidor web expuesta", titles)
-        self.assertIn("Redis expuesto", titles)
+        self.assertIn("Redis expuesto (autenticación activa)", titles)
+        self.assertIn("Redis sin autenticación", titles)
+        sev = {f.title: f.severity for f in findings}
+        self.assertEqual(sev["Redis sin autenticación"], Severity.HIGH)
+        self.assertEqual(sev["Redis expuesto (autenticación activa)"], Severity.MEDIUM)
         self.assertIn("TLS obsoleto aceptado", titles)
         self.assertEqual(findings[0].severity, Severity.HIGH)
 
@@ -228,12 +263,162 @@ class CliTest(unittest.TestCase):
         self.assertEqual(self.run_cli("--scope", str(self.scope), "127.0.0.1", "-p", "99999"),
                          cli.EXIT_ERROR)
 
+    def test_top_ports_zero_is_error(self):
+        self.assertEqual(self.run_cli("--scope", str(self.scope), "127.0.0.1", "--top-ports", "0"),
+                         cli.EXIT_ERROR)
+
+    def test_reports_are_private(self):
+        out = self.tmp / "r.json"
+        self.run_cli("--scope", str(self.scope), "127.0.0.1", "-p", str(_closed_port()),
+                     "-q", "-o", str(out))
+        self.assertEqual(oct(out.stat().st_mode & 0o777), "0o600")
+
     def test_missing_scope_file(self):
         code = self.run_cli("--scope", str(self.tmp / "nope.txt"), "127.0.0.1")
         self.assertEqual(code, cli.EXIT_SCOPE)
 
 
+class ScopeSizeTest(unittest.TestCase):
+    def test_huge_ranges_rejected_without_expanding(self):
+        import time
+        scope = parse_scope("192.168.56.0/24\n")
+        t0 = time.time()
+        for big in ("10.0.0.0/8", "10.0.0.0/12", "2001:db8::/64", "0.0.0.0/1"):
+            with self.assertRaises(ScopeError):
+                resolve_targets([big], scope)
+        self.assertLess(time.time() - t0, 0.5)
+
+    def test_subnet_in_scope_accepted(self):
+        scope = parse_scope("192.168.56.0/24\n")
+        self.assertEqual(len(resolve_targets(["192.168.56.0/25"], scope)), 126)
+
+    def test_union_of_scope_entries_covers_target(self):
+        scope = parse_scope("192.168.56.0/25\n192.168.56.128/25\n")
+        self.assertEqual(len(resolve_targets(["192.168.56.0/24"], scope)), 254)
+
+    def test_cumulative_max_hosts(self):
+        scope = parse_scope("192.168.56.0/24\n")
+        with self.assertRaises(ScopeError):
+            resolve_targets(["192.168.56.0/25", "192.168.56.128/25"], scope, max_hosts=200)
+
+
+class MarkdownEscapeTest(unittest.TestCase):
+    def test_banner_cannot_break_out(self):
+        from portscan.models import ModuleResult, Report
+        from portscan.report.markdown_report import render_markdown
+        evil = "x` [click](http://evil.example) `` <img src=x> | col"
+        res = PortResult("10.0.0.1", 80, PortState.OPEN, service="http", banner=evil)
+        from portscan.models import Finding
+        report = Report("10.0.0.1", [ModuleResult(
+            "portscan", "10.0.0.1",
+            data={"meta": {}, "ports": [res.to_dict()]},
+            findings=[Finding("t", Severity.LOW, "d", "r", evidence=evil)])])
+        md = render_markdown(report)
+        for line in md.splitlines():
+            if "evil.example" in line:
+                # todo el contenido hostil debe estar dentro de un code span cuyo
+                # delimitador (``` ) es más largo que cualquier racha interna
+                self.assertIn("```", line)
+                inner = line.split("```", 1)[1]
+                self.assertIn("evil.example", inner.rsplit("```", 1)[0])
+
+
+class AuditChainTest(unittest.TestCase):
+    def test_tamper_detected(self):
+        from portscan.audit import AuditLog
+        tmp = Path(tempfile.mkdtemp()) / "a.jsonl"
+        log = AuditLog(tmp)
+        for i in range(3):
+            log.write("start", f"id{i}", n=i)
+        self.assertEqual(log.verify()[:2], (True, 3))
+        lines = tmp.read_text().splitlines()
+        tmp.write_text("\n".join([lines[0], lines[2]]) + "\n")  # borra la intermedia
+        self.assertFalse(log.verify()[0])
+        self.assertEqual(oct(tmp.stat().st_mode & 0o777), "0o600")
+
+
+class TlsLegacyTest(unittest.TestCase):
+    """Servidor TLS local real: cada versión se sondea por separado."""
+
+    def _server(self, minv, maxv):
+        import shutil
+        import subprocess
+        import ssl as _ssl
+        import warnings
+        if not shutil.which("openssl"):
+            self.skipTest("openssl no disponible")
+        d = Path(tempfile.mkdtemp())
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                        "-keyout", str(d / "k.pem"), "-out", str(d / "c.pem"), "-days", "1",
+                        "-subj", "/CN=localhost"], check=True, capture_output=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+            ctx.set_ciphers("ALL:@SECLEVEL=0")
+            ctx.minimum_version = minv
+            ctx.maximum_version = maxv
+        ctx.load_cert_chain(str(d / "c.pem"), str(d / "k.pem"))
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(8)
+        stop = threading.Event()
+
+        def loop():
+            srv.settimeout(0.1)
+            while not stop.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    continue
+                try:
+                    ctx.wrap_socket(conn, server_side=True).close()
+                except OSError:
+                    conn.close()
+
+        t = threading.Thread(target=loop, daemon=True)
+        t.start()
+
+        def close():
+            stop.set()
+            t.join()
+            srv.close()
+
+        self.addCleanup(close)
+        return srv.getsockname()[1]
+
+    def test_modern_only_server_reports_no_legacy(self):
+        import ssl as _ssl
+        from portscan.scanner import probe_legacy_tls
+        port = self._server(_ssl.TLSVersion.TLSv1_2, _ssl.TLSVersion.TLSv1_3)
+        self.assertEqual(probe_legacy_tls("127.0.0.1", port, 2), [])
+
+    def test_legacy_server_detected(self):
+        import ssl as _ssl
+        from portscan.scanner import probe_legacy_tls
+        port = self._server(_ssl.TLSVersion.TLSv1, _ssl.TLSVersion.TLSv1_3)
+        got = probe_legacy_tls("127.0.0.1", port, 2)
+        if not got:
+            self.skipTest("este OpenSSL no puede negociar TLS 1.0/1.1 (política del sistema)")
+        self.assertIn("TLSv1", got)
+
+
 class InteractiveTest(unittest.TestCase):
+    def test_authorization_is_separate_and_not_automatic(self):
+        import portscan.interactive as it
+        tmp = Path(tempfile.mkdtemp())
+        patcher = mock.patch.object(it, "_scope_path", lambda: tmp / "scope.txt")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.assertFalse(it._in_scope("10.77.0.9"))   # sin scope.txt: nada autorizado
+        self.assertFalse((tmp / "scope.txt").exists())  # y consultar no escribe
+        with mock.patch.object(it, "_ask", return_value=""):
+            self.assertFalse(it._authorize("10.77.0.9"))
+        self.assertFalse((tmp / "scope.txt").exists())
+        with mock.patch.object(it, "_ask", return_value="AUTORIZO"):
+            self.assertTrue(it._authorize("10.77.0.9"))
+        self.assertTrue(it._in_scope("10.77.0.9"))
+        self.assertFalse(it._in_scope("10.77.0.10"))   # solo lo autorizado
+
     def test_check_target(self):
         from portscan.interactive import _check_target
         hosts, public = _check_target("127.0.0.1")

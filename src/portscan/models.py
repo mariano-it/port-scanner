@@ -52,6 +52,7 @@ class PortResult:
     service: str = ""
     banner: str = ""
     tls: str = ""
+    tls_legacy: list[str] = field(default_factory=list)  # versiones obsoletas aceptadas
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -62,6 +63,7 @@ class PortResult:
             "service": self.service,
             "banner": self.banner,
             "tls": self.tls,
+            "tls_legacy": list(self.tls_legacy),
         }
 
 

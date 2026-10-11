@@ -11,7 +11,7 @@ from pathlib import Path
 from portscan import __version__
 from portscan import cli as scan_cli
 from portscan.detect import cli as detect_cli
-from portscan.scope import ScopeError, parse_scope, resolve_targets
+from portscan.scope import ScopeError, load_scope, parse_scope, resolve_targets
 
 BANNER = r"""
   ____   ___  ____ _____   ____   ____    _    _   _ _   _ _____ ____
@@ -70,22 +70,40 @@ def _scope_path() -> Path:
     return ROOT / "scope.txt"
 
 
-def _add_to_scope(target: str) -> Path:
-    """Registra el objetivo (ya confirmado por el usuario) en scope.txt."""
+def _in_scope(target: str) -> bool:
+    """¿Ya está autorizado en el scope.txt existente? (no escribe nada)"""
     path = _scope_path()
-    existing = path.read_text().splitlines() if path.exists() else []
-    if target not in (l.split("#", 1)[0].strip() for l in existing):
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        with open(path, "a", encoding="utf-8") as fh:
-            if existing and not path.read_text().endswith("\n"):
-                fh.write("\n")
-            fh.write(f"{target}  # añadido desde modo interactivo {stamp}\n")
-    return path
+    if not path.exists():
+        return False
+    try:
+        resolve_targets([target], load_scope(path), allow_public=True, max_hosts=1024)
+    except ScopeError:
+        return False
+    return True
+
+
+def _authorize(target: str) -> bool:
+    """Alta explícita del objetivo en scope.txt: decisión aparte del escaneo."""
+    print(S.paint(f"\n  {target} no está en {_scope_path().name}.", "33"))
+    print("  El alcance es tu autorización documentada: agregarlo es una decisión")
+    print("  separada del escaneo y queda en el archivo hasta que lo borres.")
+    if _ask("Escribe AUTORIZO (mayúsculas) para añadirlo, o Enter para cancelar") != "AUTORIZO":
+        print(S.paint("  Cancelado: no se escaneó ni se modificó el alcance.", "33"))
+        return False
+    path = _scope_path()
+    prefix = ""
+    if path.exists() and path.read_text() and not path.read_text().endswith("\n"):
+        prefix = "\n"
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(f"{prefix}{target}  # autorizado desde modo interactivo {stamp}\n")
+    print(S.paint(f"  Añadido a {path}. Bórralo de ahí para revocarlo.", "2"))
+    return True
 
 
 def _check_target(target: str) -> tuple[list[str], bool]:
-    """Valida el objetivo; devuelve (hosts, hay_ip_publica)."""
-    scope = parse_scope(target)  # lanza ScopeError si es demasiado amplio / irresoluble
+    """Valida forma y tamaño del objetivo; devuelve (hosts, hay_ip_publica)."""
+    scope = parse_scope(target)  # ScopeError si es demasiado amplio / irresoluble
     hosts = resolve_targets([target], scope, allow_public=True, max_hosts=1024)
     public = any(ipaddress.ip_address(h).is_global for h in hosts)
     return hosts, public
@@ -133,8 +151,7 @@ def _run_scan(preset_target: str | None = None) -> None:
             print(S.paint("  Cancelado.", "33"))
             return
         extra.append("--allow-public")
-    elif not _confirm("¿Es un sistema tuyo o tienes autorización para escanearlo?"):
-        print(S.paint("  Cancelado.", "33"))
+    if not _in_scope(target) and not _authorize(target):
         return
 
     profile = _pick_profile()
@@ -145,7 +162,7 @@ def _run_scan(preset_target: str | None = None) -> None:
         print(S.paint("  Velocidad inválida.", "31"))
         return
 
-    scope_file = _add_to_scope(target)
+    scope_file = _scope_path()
     out_dir = ROOT / "reports"
     out_dir.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

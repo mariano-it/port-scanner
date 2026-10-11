@@ -1,16 +1,30 @@
 from __future__ import annotations
 
+import re
+
 from portscan.models import Report, Severity
 
 
-def _cell(text: str) -> str:
-    return str(text).replace("|", "\\|").replace("\n", " ")
+def _code(text: object) -> str:
+    """Texto NO confiable (banners, hosts, rutas) como código en línea.
+
+    El delimitador es más largo que cualquier racha de comillas invertidas del
+    contenido, así que no se puede cerrar el span ni inyectar enlaces/HTML. Los
+    saltos de línea y el pipe se neutralizan para no romper tablas.
+    """
+    raw = " ".join(str(text).split())
+    if not raw:
+        return "—"
+    longest = max((len(m) for m in re.findall(r"`+", raw)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if raw.startswith("`") or raw.endswith("`") else ""
+    return f"{fence}{pad}{raw.replace('|', '&#124;')}{pad}{fence}"
 
 
 def render_markdown(report: Report) -> str:
     data = report.to_dict()
     lines = [
-        f"# Reporte de escaneo de puertos: {report.target}",
+        f"# Reporte de escaneo de puertos: {_code(report.target)}",
         "",
         f"Generado: {data['generated_at']}",
         "",
@@ -36,15 +50,16 @@ def render_markdown(report: Report) -> str:
             f"- **Descripción:** {f.description}",
         ]
         if f.evidence:
-            lines.append(f"- **Evidencia:** `{f.evidence}`")
+            lines.append(f"- **Evidencia:** {_code(f.evidence)}")
         lines += [f"- **Remediación:** {f.remediation}", ""]
 
     lines += ["## Puertos", ""]
     for r in report.results:
         meta = r.data.get("meta", {})
         lines += [
-            f"- **Scan ID:** `{meta.get('scan_id', '')}`",
-            f"- **Alcance:** `{meta.get('scope_file', '')}` (sha256 `{str(meta.get('scope_sha256', ''))[:12]}`)",
+            f"- **Scan ID:** {_code(meta.get('scan_id', ''))}",
+            f"- **Alcance:** {_code(meta.get('scope_file', ''))} "
+            f"(sha256 {_code(str(meta.get('scope_sha256', ''))[:12])})",
             f"- **Puertos probados:** {meta.get('ports_scanned', 0)} por host, "
             f"{meta.get('hosts', 0)} host(s), {meta.get('rate', '?')} intentos/s",
             f"- **Estados:** {meta.get('state_counts', {})}",
@@ -53,9 +68,12 @@ def render_markdown(report: Report) -> str:
             "|---|---|---|---|---|---|",
         ]
         for p in r.data.get("ports", []):
+            tls = p["tls"]
+            if p.get("tls_legacy"):
+                tls = f"{tls} (acepta {', '.join(p['tls_legacy'])})".strip()
             lines.append(
-                f"| {p['host']} | {p['port']}/{p['proto']} | {p['state']} | "
-                f"{_cell(p['service'])} | {_cell(p['banner'])} | {_cell(p['tls'])} |"
+                f"| {_code(p['host'])} | {p['port']}/{p['proto']} | {p['state']} | "
+                f"{_code(p['service'])} | {_code(p['banner'])} | {_code(tls)} |"
             )
         lines.append("")
     return "\n".join(lines)

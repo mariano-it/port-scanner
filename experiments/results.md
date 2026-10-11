@@ -19,6 +19,7 @@ LIVE real. Cada perfil pasa por: log tipo UFW -> parser -> detector.
 | Z1. Tráfico web normal | 40 clientes, 2000 conexiones a :443 | 2000 | — | — | **ok (sin alerta)** |
 | Z2. Monitoreo legítimo | Nagios sondea 12 servicios cada 5 min | 144 | — | — | **ok (sin alerta)** |
 | Z4. Monitoreo espaciado | 20 servicios, 1 sonda cada 15 s, ciclo de 5 min | 240 | — | — | **ok (sin alerta)** |
+| Z5. Navegación web (eve.json) | 1 cliente, 40 servidores :443 en 6 s, flujos con tráfico real | 40 | — | — | **ok (sin alerta)** |
 | Z3. Reintentos a un puerto | cliente reintenta :22 cada 2 s (fuerza bruta/mal config) | 300 | — | — | **ok (sin alerta)** |
 | L. LIVE: portscan real | scanner real a 500/s, 600 puertos en localhost | 600 | fast | 0.0 s | **detectado** |
 
@@ -38,6 +39,7 @@ LIVE real. Cada perfil pasa por: log tipo UFW -> parser -> detector.
 | Z1. Tráfico web normal | 40 clientes, 2000 conexiones a :443 | 2000 | — | — | **ok (sin alerta)** |
 | Z2. Monitoreo legítimo | Nagios sondea 12 servicios cada 5 min | 144 | — | — | **ok (sin alerta)** |
 | Z4. Monitoreo espaciado | 20 servicios, 1 sonda cada 15 s, ciclo de 5 min | 240 | — | — | **ok (sin alerta)** |
+| Z5. Navegación web (eve.json) | 1 cliente, 40 servidores :443 en 6 s, flujos con tráfico real | 40 | — | — | **ok (sin alerta)** |
 | Z3. Reintentos a un puerto | cliente reintenta :22 cada 2 s (fuerza bruta/mal config) | 300 | — | — | **ok (sin alerta)** |
 | L. LIVE: portscan real | scanner real a 500/s, 600 puertos en localhost | 600 | fast, slow | 0.0 s | **detectado** |
 
@@ -57,6 +59,7 @@ LIVE real. Cada perfil pasa por: log tipo UFW -> parser -> detector.
 | Z1. Tráfico web normal | 40 clientes, 2000 conexiones a :443 | 2000 | — | — | **ok (sin alerta)** |
 | Z2. Monitoreo legítimo | Nagios sondea 12 servicios cada 5 min | 144 | — | — | **ok (sin alerta)** |
 | Z4. Monitoreo espaciado | 20 servicios, 1 sonda cada 15 s, ciclo de 5 min | 240 | — | — | **ok (sin alerta)** |
+| Z5. Navegación web (eve.json) | 1 cliente, 40 servidores :443 en 6 s, flujos con tráfico real | 40 | — | — | **ok (sin alerta)** |
 | Z3. Reintentos a un puerto | cliente reintenta :22 cada 2 s (fuerza bruta/mal config) | 300 | — | — | **ok (sin alerta)** |
 | L. LIVE: portscan real | scanner real a 500/s, 600 puertos en localhost | 600 | fast, slow | 0.0 s | **detectado** |
 
@@ -76,8 +79,15 @@ LIVE real. Cada perfil pasa por: log tipo UFW -> parser -> detector.
 | Z1. Tráfico web normal | 40 clientes, 2000 conexiones a :443 | 2000 | — | — | **ok (sin alerta)** |
 | Z2. Monitoreo legítimo | Nagios sondea 12 servicios cada 5 min | 144 | — | — | **ok (sin alerta)** |
 | Z4. Monitoreo espaciado | 20 servicios, 1 sonda cada 15 s, ciclo de 5 min | 240 | slow-15 | 210.0 s | **FALSO POSITIVO** |
+| Z5. Navegación web (eve.json) | 1 cliente, 40 servidores :443 en 6 s, flujos con tráfico real | 40 | — | — | **ok (sin alerta)** |
 | Z3. Reintentos a un puerto | cliente reintenta :22 cada 2 s (fuerza bruta/mal config) | 300 | — | — | **ok (sin alerta)** |
 | L. LIVE: portscan real | scanner real a 500/s, 600 puertos en localhost | 600 | daily, fast, slow, slow-15 | 0.0 s | **detectado** |
+
+## 5. Z5 con el conteo ingenuo de flujos (`--eve-include-established`)
+
+| Perfil | Descripción | Eventos | Reglas | 1ª alerta tras | Veredicto |
+|---|---|---|---|---|---|
+| Z5. Navegación web (eve.json) | 1 cliente, 40 servidores :443 en 6 s, flujos con tráfico real | 40 | fast, slow | 2.1 s | **FALSO POSITIVO** |
 
 ## Lectura
 
@@ -88,6 +98,10 @@ LIVE real. Cada perfil pasa por: log tipo UFW -> parser -> detector.
 - El escaneo **distribuido** (F) es el punto ciego de cualquier detector por IP de origen:
   cada IP toca pocos puertos (8). Solo aparece al correlacionar por **destino** (muchos
   puertos distintos recibidos por un host desde muchos orígenes): sección 3.
+- Z5 (navegación web en `eve.json`) es un falso positivo clásico: un cliente que abre
+  40 servidores :443 parece un barrido horizontal si se cuentan todos los flujos
+  (sección 5). El parser descarta por defecto los flujos con tráfico real del servidor
+  (`pkts_toclient > 2`) y solo cuenta los que mueren en el handshake, como un escaneo.
 - Z4 es el costo de cubrir los escaneos lentos: un monitor legítimo que sondea 20
   servicios repartidos en el tiempo es indistinguible de un escaneo lento por patrón;
   se resuelve con `--allow` o con contexto (inventario de monitores), no con más umbral.

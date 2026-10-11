@@ -26,7 +26,8 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "lab"))
 
 from portscan.detect.detector import DEFAULT_RULES, Rule, detect  # noqa: E402
-from portscan.detect.parsers import Event, format_kernel_line, parse_lines  # noqa: E402
+from portscan.detect.parsers import (  # noqa: E402
+    Event, format_eve_flow, format_kernel_line, parse_lines)
 
 T0 = 1_760_000_000.0
 TARGET = "10.0.0.5"
@@ -40,6 +41,8 @@ class Profile:
     description: str
     malicious: bool
     events: list[Event]
+    fmt: str = "kernel"          # formato de log por el que pasa: kernel | eve
+    pkts_toclient: int = 1       # solo eve: paquetes del servidor por flujo
 
 
 def seq_scan(src: str, ports: list[int], rate: float, start: float = T0,
@@ -92,20 +95,28 @@ def build_profiles() -> list[Profile]:
               for c in range(12) for i in range(20)]
     ps.append(Profile("Z4. Monitoreo espaciado", "20 servicios, 1 sonda cada 15 s, ciclo de 5 min",
                       False, spread))
+    # Navegación real: un cliente abre 40 servidores distintos :443 en ~6 s (CDN, APIs,
+    # trackers). Flujos eve con tráfico del servidor (muchos paquetes).
+    browse = [Event(T0 + i * 0.15, "192.0.2.50", f"198.18.{i // 250}.{i % 250 + 1}", 443)
+              for i in range(40)]
+    ps.append(Profile("Z5. Navegación web (eve.json)", "1 cliente, 40 servidores :443 en 6 s, "
+                      "flujos con tráfico real", False, browse, fmt="eve", pkts_toclient=25))
     ps.append(Profile("Z3. Reintentos a un puerto", "cliente reintenta :22 cada 2 s (fuerza bruta/mal config)",
                       False, [Event(T0 + i * 2, "192.0.2.99", TARGET, 22) for i in range(300)]))
     return ps
 
 
-def run_detector(events: list[Event], rules=DEFAULT_RULES):
+def run_detector(events: list[Event], rules=DEFAULT_RULES, fmt: str = "kernel",
+                 pkts_toclient: int = 1, include_established: bool = False):
     """Pasa por formato log real -> parser -> detector (pipeline completo)."""
     with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as fh:
         for ev in sorted(events, key=lambda e: e.ts):
-            fh.write(format_kernel_line(ev) + "\n")
+            fh.write((format_eve_flow(ev, pkts_toclient) if fmt == "eve"
+                      else format_kernel_line(ev)) + "\n")
         path = fh.name
     try:
         with open(path) as fh:
-            parsed = list(parse_lines(fh, "kernel"))
+            parsed = list(parse_lines(fh, fmt, include_established=include_established))
     finally:
         Path(path).unlink(missing_ok=True)
     return parsed, detect(parsed, rules)
@@ -132,10 +143,11 @@ def live_profile() -> Profile | None:
                    True, attempts)
 
 
-def summarize(profiles: list[Profile], rules) -> list[dict]:
+def summarize(profiles: list[Profile], rules, include_established: bool = False) -> list[dict]:
     rows = []
     for p in profiles:
-        parsed, alerts = run_detector(p.events, rules)
+        parsed, alerts = run_detector(p.events, rules, p.fmt, p.pkts_toclient,
+                                      include_established)
         srcs = {e.src for e in p.events}
         alerted: set[str] = set()
         for a in alerts:
@@ -184,6 +196,8 @@ def main() -> int:
     per_source = [r for r in DEFAULT_RULES if r.group_by == "src"]
     fast_only = summarize(profiles, [DEFAULT_RULES[0]])
     no_dist = summarize(profiles, per_source)
+    naive = summarize([p for p in profiles if p.fmt == "eve"], DEFAULT_RULES,
+                      include_established=True)
     tuned = summarize(profiles, DEFAULT_RULES + (Rule("slow-15", 3600, 15),
                                                  Rule("daily", 86400, 25)))
 
@@ -208,6 +222,10 @@ LIVE real. Cada perfil pasa por: log tipo UFW -> parser -> detector.
 
 {table(tuned)}
 
+## 5. Z5 con el conteo ingenuo de flujos (`--eve-include-established`)
+
+{table(naive)}
+
 ## Lectura
 
 - La regla rápida atrapa lo ruidoso (A, B, G, I) en pocos segundos, pero **no ve** los
@@ -217,6 +235,10 @@ LIVE real. Cada perfil pasa por: log tipo UFW -> parser -> detector.
 - El escaneo **distribuido** (F) es el punto ciego de cualquier detector por IP de origen:
   cada IP toca pocos puertos (8). Solo aparece al correlacionar por **destino** (muchos
   puertos distintos recibidos por un host desde muchos orígenes): sección 3.
+- Z5 (navegación web en `eve.json`) es un falso positivo clásico: un cliente que abre
+  40 servidores :443 parece un barrido horizontal si se cuentan todos los flujos
+  (sección 5). El parser descarta por defecto los flujos con tráfico real del servidor
+  (`pkts_toclient > 2`) y solo cuenta los que mueren en el handshake, como un escaneo.
 - Z4 es el costo de cubrir los escaneos lentos: un monitor legítimo que sondea 20
   servicios repartidos en el tiempo es indistinguible de un escaneo lento por patrón;
   se resuelve con `--allow` o con contexto (inventario de monitores), no con más umbral.

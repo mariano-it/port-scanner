@@ -2,7 +2,7 @@
 """Servicios falsos en localhost para probar el scanner sin tocar nada real.
 
 Uso: python3 lab/fake_services.py [--host 127.0.0.1]
-Levanta puertos con banners tipo SSH viejo, Telnet, Apache 2.2 y Redis.
+Levanta puertos con banners tipo SSH viejo, Telnet, Apache 2.2 y dos Redis (con y sin autenticación).
 """
 
 from __future__ import annotations
@@ -15,7 +15,8 @@ SERVICES = {
     2222: b"SSH-2.0-OpenSSH_7.4\r\n",
     2323: b"login: ",
     8089: None,  # HTTP: responde tras recibir la petición
-    6380: None,  # Redis: responde a cualquier comando
+    6380: None,  # Redis CON autenticación: responde -NOAUTH
+    6381: None,  # Redis SIN autenticación: responde -ERR a comandos desconocidos
 }
 
 
@@ -34,6 +35,8 @@ class _Handler(socketserver.BaseRequestHandler):
                     b"HTTP/1.0 200 OK\r\nServer: Apache/2.2.15 (CentOS)\r\n\r\n")
             elif port == 6380:
                 self.request.sendall(b"-NOAUTH Authentication required.\r\n")
+            elif port == 6381:
+                self.request.sendall(b"-ERR unknown command 'HEAD', with args beginning with:\r\n")
         except OSError:
             pass
 

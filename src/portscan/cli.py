@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 import time
@@ -65,13 +66,21 @@ def _print_table(results: list[PortResult], show_all: bool, out) -> None:
               file=out)
 
 
+def _write_private(path: str, text: str) -> None:
+    """Los reportes contienen la topología de la red: solo lectura del dueño (0600)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.chmod(path, 0o600)  # también si el archivo ya existía con otros permisos
+
+
 def _write_reports(report: Report, paths: list[str]) -> None:
     for path in paths:
         suffix = Path(path).suffix.lower()
         if suffix == ".json":
-            Path(path).write_text(render_json(report))
+            _write_private(path, render_json(report))
         elif suffix in (".md", ".markdown"):
-            Path(path).write_text(render_markdown(report))
+            _write_private(path, render_markdown(report))
         else:
             raise ValueError(f"extensión no soportada para -o: {path!r} (usa .json o .md)")
 
@@ -95,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.timeout <= 0 or args.workers < 1:
         return refuse("--timeout y --workers deben ser positivos", EXIT_ERROR)
     try:
-        if args.top_ports:
+        if args.top_ports is not None:
             ports = top_ports(args.top_ports)
         else:
             ports = parse_ports(args.ports or "1-1024")

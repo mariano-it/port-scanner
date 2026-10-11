@@ -25,7 +25,7 @@ _BANNER_SIGNATURES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"^220[ -].*(smtp|esmtp|postfix|exim)", re.I), "smtp"),
     (re.compile(r"^\+OK"), "pop3"),
     (re.compile(r"^\* OK"), "imap"),
-    (re.compile(r"^-(ERR|NOAUTH|DENIED)"), "redis"),
+    (re.compile(r"^-(ERR unknown command|NOAUTH|DENIED)"), "redis"),
     (re.compile(r"mysql|mariadb", re.I), "mysql"),
     (re.compile(r"^RFB \d"), "vnc"),
     (re.compile(r"(?i)^\W*(login|username):\s*$"), "telnet"),

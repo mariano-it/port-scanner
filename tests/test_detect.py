@@ -2,7 +2,8 @@ import json
 import unittest
 
 from portscan.detect.detector import DEFAULT_RULES, Rule, detect
-from portscan.detect.parsers import Event, format_kernel_line, parse_eve_line, parse_kernel_line, parse_lines
+from portscan.detect.parsers import (Event, format_eve_flow, format_kernel_line, parse_eve_line,
+                                     parse_kernel_line, parse_lines)
 
 T0 = 1_760_000_000.0
 
@@ -38,6 +39,32 @@ class ParserTest(unittest.TestCase):
         ev = parse_eve_line(line)
         self.assertEqual((ev.src, ev.dport), ("1.1.1.1", 80))
         self.assertEqual(len(list(parse_lines([line, "{bad json"], "auto"))), 1)
+
+
+class EveFalsePositiveTest(unittest.TestCase):
+    def _browse(self, pkts):
+        return [format_eve_flow(Event(T0 + i * 0.2, "192.0.2.50", f"198.18.0.{i + 1}", 443), pkts)
+                for i in range(20)]
+
+    def test_web_browsing_is_not_a_sweep(self):
+        evs = list(parse_lines(self._browse(25), "eve"))
+        self.assertEqual(evs, [])
+        self.assertEqual(detect(evs, DEFAULT_RULES), [])
+
+    def test_unanswered_syns_are_a_sweep(self):
+        evs = list(parse_lines(self._browse(0), "eve"))
+        self.assertEqual(len(evs), 20)
+        self.assertEqual(detect(evs, DEFAULT_RULES)[0].kind, "horizontal")
+
+    def test_opt_in_counts_established(self):
+        evs = list(parse_lines(self._browse(25), "eve", include_established=True))
+        self.assertEqual(len(evs), 20)
+
+    def test_alerts_always_count(self):
+        line = json.dumps({"timestamp": "2026-10-10T21:48:01.123456+0000", "event_type": "alert",
+                           "src_ip": "1.1.1.1", "dest_ip": "2.2.2.2", "dest_port": 80,
+                           "flow": {"pkts_toclient": 50}})
+        self.assertIsNotNone(parse_eve_line(line))
 
 
 class DetectorTest(unittest.TestCase):

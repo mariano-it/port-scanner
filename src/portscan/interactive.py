@@ -70,13 +70,17 @@ def _scope_path() -> Path:
     return ROOT / "scope.txt"
 
 
+BIG_NETWORK = 1024     # a partir de aquí se avisa y se activa el modo "red grande"
+MAX_HOSTS = 1 << 16    # un /16
+
+
 def _in_scope(target: str) -> bool:
     """¿Ya está autorizado en el scope.txt existente? (no escribe nada)"""
     path = _scope_path()
     if not path.exists():
         return False
     try:
-        resolve_targets([target], load_scope(path), allow_public=True, max_hosts=1024)
+        resolve_targets([target], load_scope(path), allow_public=True, max_hosts=MAX_HOSTS)
     except ScopeError:
         return False
     return True
@@ -104,7 +108,7 @@ def _authorize(target: str) -> bool:
 def _check_target(target: str) -> tuple[list[str], bool]:
     """Valida forma y tamaño del objetivo; devuelve (hosts, hay_ip_publica)."""
     scope = parse_scope(target)  # ScopeError si es demasiado amplio / irresoluble
-    hosts = resolve_targets([target], scope, allow_public=True, max_hosts=1024)
+    hosts = resolve_targets([target], scope, allow_public=True, max_hosts=MAX_HOSTS)
     public = any(ipaddress.ip_address(h).is_global for h in hosts)
     return hosts, public
 
@@ -154,8 +158,13 @@ def _run_scan(preset_target: str | None = None) -> None:
     if not _in_scope(target) and not _authorize(target):
         return
 
+    big = len(hosts) > BIG_NETWORK
+    if big:
+        print(S.paint(f"\n  Red grande: {len(hosts)} hosts.", "33"))
+        print("  Primero se descubren los hosts vivos y solo a esos se les escanean puertos.")
+        print("  Recomendado el perfil Rápido y una velocidad alta (si tu red la aguanta).")
     profile = _pick_profile()
-    rate = _ask("Velocidad (intentos/segundo)", "200")
+    rate = _ask("Velocidad (intentos/segundo)", "1000" if big else "200")
     try:
         float(rate)
     except ValueError:
@@ -171,7 +180,17 @@ def _run_scan(preset_target: str | None = None) -> None:
 
     argv = [target, "--scope", str(scope_file), *profile, "--rate", rate, "--progress",
             "-o", f"{base}.json", "-o", f"{base}.md", *extra]
-    print(S.paint("\n  Escaneando… (Ctrl+C para cancelar)\n", "2"))
+    if big:
+        argv += ["--max-hosts", str(MAX_HOSTS), "--workers", "256"]
+        probes = len(hosts) * 6
+        est = probes / max(float(rate), 1)
+        print(S.paint(f"\n  Descubrimiento: hasta {probes} sondeos, ~{est / 60:.0f} min "
+                      "en el peor caso (hosts caídos).", "2"))
+        if not _confirm("¿Continuar?", default=True):
+            print(S.paint("  Cancelado.", "33"))
+            return
+    print(S.paint("\n  Escaneando… (Ctrl+C para cancelar; se guardan resultados parciales)\n",
+                  "2"))
     code = scan_cli.main(argv)
     if code == scan_cli.EXIT_OK:
         print(S.paint(f"\n  Reportes guardados en {base}.json y {base}.md", "32"))

@@ -278,6 +278,85 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, cli.EXIT_SCOPE)
 
 
+class LargeNetworkTest(unittest.TestCase):
+    def test_pairs_is_lazy(self):
+        from portscan.scanner import _pairs
+        gen = _pairs([f"10.0.{i // 250}.{i % 250}" for i in range(65000)], list(range(1, 101)), False)
+        self.assertEqual(next(gen), ("10.0.0.0", 1))   # no materializa 6,5 M de pares
+        self.assertEqual(sum(1 for _ in zip(range(1000), gen)), 1000)
+
+    def test_discovery_counts_rst_as_alive(self):
+        from portscan.scanner import discover
+        port, close = _server(b"x\r\n")
+        self.addCleanup(close)
+        seen = []
+        alive = discover(["127.0.0.1", "127.0.0.2"], ScanConfig(rate=1000, timeout=0.5, workers=4),
+                         [_closed_port(), port], on_host=lambda h, up: seen.append((h, up)))
+        # 127.0.0.2 no escucha en `port` pero responde RST: sigue siendo un host vivo
+        self.assertEqual(alive, ["127.0.0.1", "127.0.0.2"])
+        self.assertEqual(len(seen), 2)
+
+    def test_discovery_filtered_host_is_not_alive(self):
+        from portscan.scanner import discover
+
+        class Fake:
+            def __init__(self, *a, **k):
+                pass
+
+            def settimeout(self, t):
+                pass
+
+            def connect_ex(self, addr):
+                return errno.ETIMEDOUT
+
+            def close(self):
+                pass
+
+        with mock.patch("portscan.scanner.socket.socket", Fake):
+            self.assertEqual(discover(["192.0.2.1"], ScanConfig(rate=1000), [22, 80]), [])
+
+    def test_keep_only_open_but_count_everything(self):
+        from collections import Counter
+        port, close = _server(b"hi\r\n")
+        self.addCleanup(close)
+        stats = Counter()
+        res = scan(["127.0.0.1"], [port, _closed_port(), _closed_port()],
+                   ScanConfig(rate=1000, timeout=1), keep_all=False, stats=stats)
+        self.assertEqual([r.port for r in res], [port])
+        self.assertEqual(sum(stats.values()), 3)
+        self.assertEqual(stats["open"], 1)
+
+    def test_diagnose(self):
+        from collections import Counter
+        from portscan.cli import _diagnose
+        self.assertIn("filtered", _diagnose(Counter(filtered=100), None, False)[0])
+        self.assertIn("closed", _diagnose(Counter(closed=100), None, False)[0])
+        self.assertTrue(any("descubrimiento" in t.lower() for t in _diagnose(Counter(filtered=5), 0, True)))
+
+    def test_slash_16_needs_max_hosts(self):
+        scope = parse_scope("10.20.0.0/16\n")
+        with self.assertRaises(ScopeError):
+            resolve_targets(["10.20.0.0/16"], scope)            # default 1024
+        hosts = resolve_targets(["10.20.0.0/16"], scope, max_hosts=65536)
+        self.assertEqual(len(hosts), 65534)
+
+    def test_host_sort_is_numeric(self):
+        from portscan.scanner import _host_key
+        hosts = ["10.0.200.9", "10.0.5.7", "10.0.255.254"]
+        self.assertEqual(sorted(hosts, key=_host_key), ["10.0.5.7", "10.0.200.9", "10.0.255.254"])
+
+    def test_cli_discover_only(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "s.txt").write_text("127.0.0.0/30\n")
+        out = tmp / "r.json"
+        code = cli.main(["--scope", str(tmp / "s.txt"), "127.0.0.0/30", "--discover-only",
+                         "--discovery-ports", str(_closed_port()), "-q", "-o", str(out),
+                         "--audit-log", str(tmp / "a.jsonl"), "--timeout", "0.5"])
+        self.assertEqual(code, 0)
+        data = json.loads(out.read_text())["results"][0]["data"]
+        self.assertEqual(data["alive_hosts"], ["127.0.0.1", "127.0.0.2"])
+
+
 class ScopeSizeTest(unittest.TestCase):
     def test_huge_ranges_rejected_without_expanding(self):
         import time

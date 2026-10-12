@@ -9,9 +9,10 @@ import ssl
 import threading
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor
+import ipaddress
+from collections import Counter
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Iterable, Iterator
 
 from portscan.models import PortResult, PortState
 from portscan.ratelimit import RateLimiter
@@ -166,6 +167,62 @@ def probe_port(host: str, port: int, cfg: ScanConfig) -> PortResult:
             pass
 
 
+class _Feeder:
+    """Iterador compartido entre hilos: reparte trabajo sin materializar la lista."""
+
+    def __init__(self, items: Iterable):
+        self._it = iter(items)
+        self._lock = threading.Lock()
+
+    def next(self):
+        with self._lock:
+            return next(self._it, None)  # los items nunca son None
+
+
+def _run_workers(items: Iterable, work: Callable, workers: int, stop: threading.Event) -> None:
+    """Ejecuta work(item) en `workers` hilos. Ctrl+C detiene y propaga limpiamente."""
+    feeder = _Feeder(items)
+    errors: list[BaseException] = []
+
+    def loop() -> None:
+        while not stop.is_set():
+            item = feeder.next()
+            if item is None:
+                return
+            try:
+                work(item)
+            except BaseException as exc:  # noqa: BLE001 - se re-lanza en el hilo principal
+                errors.append(exc)
+                stop.set()
+                return
+
+    threads = [threading.Thread(target=loop, daemon=True) for _ in range(max(1, workers))]
+    for t in threads:
+        t.start()
+    try:
+        for t in threads:
+            while t.is_alive():
+                t.join(0.2)
+    except KeyboardInterrupt:
+        stop.set()
+        raise
+    if errors:
+        raise errors[0]
+
+
+def _pairs(hosts: list[str], ports: list[int], shuffle: bool) -> Iterator[tuple[str, int]]:
+    """host x puerto perezoso: O(hosts + ports) de memoria aunque sean millones."""
+    order = list(hosts)
+    plist = list(ports)
+    if shuffle:
+        random.shuffle(order)
+    for host in order:
+        if shuffle:
+            random.shuffle(plist)
+        for port in plist:
+            yield host, port
+
+
 def scan(
     hosts: list[str],
     ports: list[int],
@@ -173,19 +230,23 @@ def scan(
     on_result: Callable[[PortResult], None] | None = None,
     on_attempt: Callable[[float, str, int], None] | None = None,
     stop: threading.Event | None = None,
+    keep_all: bool = True,
+    stats: Counter | None = None,
+    into: list[PortResult] | None = None,
 ) -> list[PortResult]:
-    """Escanea host x puerto. `on_attempt(ts, host, port)` se llama antes de cada conexión."""
-    pairs = [(h, p) for h in hosts for p in ports]
-    if cfg.shuffle:
-        random.shuffle(pairs)
+    """Escanea host x puerto en streaming.
+
+    `on_attempt(ts, host, port)` se llama antes de cada conexión. Con keep_all=False
+    solo se conservan los puertos abiertos (un /16 genera millones de cerrados);
+    `stats` acumula el conteo por estado de TODO lo probado. `into` es la lista donde
+    se acumulan los resultados: así quedan disponibles si el escaneo se interrumpe.
+    """
     limiter = RateLimiter(cfg.rate)
     stop = stop or threading.Event()
     lock = threading.Lock()
-    results: list[PortResult] = []
+    results: list[PortResult] = into if into is not None else []
 
     def work(pair: tuple[str, int]) -> None:
-        if stop.is_set():
-            return
         limiter.acquire()
         if stop.is_set():
             return
@@ -194,11 +255,65 @@ def scan(
             on_attempt(time.time(), host, port)
         res = probe_port(host, port, cfg)
         with lock:
-            results.append(res)
+            if stats is not None:
+                stats[res.state.value] += 1
+            if keep_all or res.state is PortState.OPEN:
+                results.append(res)
             if on_result:
                 on_result(res)
 
-    with ThreadPoolExecutor(max_workers=max(1, cfg.workers)) as pool:
-        list(pool.map(work, pairs))
-    results.sort(key=lambda r: (r.host, r.port))
+    _run_workers(_pairs(hosts, ports, cfg.shuffle), work, cfg.workers, stop)
+    results.sort(key=lambda r: (_host_key(r.host), r.port))
     return results
+
+
+def _host_key(host: str):
+    try:
+        ip = ipaddress.ip_address(host)
+        return (ip.version, int(ip))
+    except ValueError:
+        return (0, host)
+
+
+DISCOVERY_PORTS = [22, 80, 443, 445, 3389, 8080]
+
+
+def discover(
+    hosts: list[str],
+    cfg: ScanConfig,
+    ports: list[int] | None = None,
+    on_host: Callable[[str, bool], None] | None = None,
+    stop: threading.Event | None = None,
+) -> list[str]:
+    """Hosts "vivos": responden a algún puerto con SYN-ACK **o con RST**.
+
+    Un RST (puerto cerrado) también prueba que el host existe. Sin raw sockets no hay
+    ICMP, así que un host que descarta TODO el tráfico a estos puertos no se ve; si
+    sospechas de eso, salta el descubrimiento (--no-discovery). Se detiene en el primer
+    puerto que responde, por lo que los hosts vivos cuestan 1-2 intentos.
+    """
+    probe_ports = ports or DISCOVERY_PORTS
+    probe_cfg = ScanConfig(rate=cfg.rate, timeout=cfg.timeout, workers=cfg.workers,
+                           banners=False)
+    limiter = RateLimiter(cfg.rate)
+    stop = stop or threading.Event()
+    lock = threading.Lock()
+    alive: set[str] = set()
+
+    def work(host: str) -> None:
+        up = False
+        for port in probe_ports:
+            limiter.acquire()
+            if stop.is_set():
+                return
+            if probe_port(host, port, probe_cfg).state is not PortState.FILTERED:
+                up = True
+                break
+        with lock:
+            if up:
+                alive.add(host)
+            if on_host:
+                on_host(host, up)
+
+    _run_workers(hosts, work, cfg.workers, stop)
+    return sorted(alive, key=_host_key)

@@ -122,12 +122,50 @@ pip install -e .
 | `--shuffle` | Orden aleatorio de puertos |
 | `--all` | Muestra también puertos cerrados y filtrados |
 | `--allow-public` | Permite IPs públicas (solo con autorización escrita) |
-| `--max-hosts N` | Tope de hosts por escaneo (por defecto 1024) |
+| `--max-hosts N` | Tope de hosts por escaneo (por defecto 1024, máximo 65536: un /16) |
+| `--discover` / `--no-discovery` | Fuerza o desactiva el descubrimiento de hosts (automático con más de 256 hosts) |
+| `--discovery-ports` | Puertos del descubrimiento (por defecto `22,80,443,445,3389,8080`) |
+| `--discover-only` | Solo lista los hosts vivos y termina |
 | `-o FILE` | Reporte `.json` o `.md` (repetible) |
 | `--audit-log FILE` | Ruta del log de auditoría (o variable `PORTSCAN_AUDIT`) |
 | `--progress`, `-q` | Barra de progreso / salida silenciosa |
 
 Códigos de salida: `0` correcto · `1` error de uso · `2` objetivo fuera de alcance.
+
+## Redes grandes (/16)
+
+Un `/16` son 65 534 hosts. Para que sea práctico, el scanner trabaja en dos fases y en
+streaming (memoria constante, ~45 MB en la prueba con un /16 completo):
+
+1. **Descubrimiento**: un host se considera vivo si responde a algún puerto de
+   `--discovery-ports` con SYN-ACK **o con RST** (un puerto cerrado también delata que el host
+   existe). Se activa solo con más de 256 hosts.
+2. **Escaneo de puertos**: únicamente sobre los hosts vivos.
+
+```bash
+# el rango debe estar en el scope (p. ej. 10.20.0.0/16) y hay que subir el tope a propósito
+python3 -m portscan --scope scope.txt 10.20.0.0/16 --top-ports 100 --banners \
+        --max-hosts 65536 --workers 256 --rate 1000 --progress -o red.json -o red.md
+
+# solo saber qué hosts están vivos (rápido, un puerto por host vivo)
+python3 -m portscan --scope scope.txt 10.20.0.0/16 --discover-only --max-hosts 65536 \
+        --workers 256 --rate 1500 -o vivos.json
+```
+
+Notas prácticas:
+
+- `--progress` muestra velocidad y ETA. Con Ctrl+C se conservan y guardan los resultados
+  parciales (el reporte lleva `aborted: true`).
+- Con hosts caídos, cada uno cuesta hasta `len(--discovery-ports)` intentos con timeout:
+  en el peor caso `hosts × 6 / --rate` segundos. Sube `--rate` y `--workers` si tu red lo
+  aguanta, o reduce `--discovery-ports`.
+- Sin raw sockets no hay ICMP: un host que **descarta todo** el tráfico a los puertos de
+  descubrimiento no aparece como vivo. Si sospechas de eso, usa `--no-discovery` (más lento)
+  o añade puertos a `--discovery-ports`.
+- Si no aparece ningún puerto abierto, el scanner lo explica según lo observado: casi todo
+  `filtered` (firewall, host apagado o `--timeout` corto: prueba `--timeout 3`) o casi todo
+  `closed` (hay host pero no servicios en esos puertos: prueba `-p 1-10000`).
+- En el modo interactivo (`run.py`) todo esto se activa solo al indicar un rango grande.
 
 ## Salida de ejemplo
 
@@ -280,7 +318,7 @@ port-scanner/
 ├── detection/rules/            # Sigma, Suricata, guía de logging
 ├── experiments/                # experimento y resultados
 ├── lab/fake_services.py        # servicios falsos para pruebas
-└── tests/                      # 50 pruebas (unittest)
+└── tests/                      # 58 pruebas (unittest)
 ```
 
 ## Pruebas
